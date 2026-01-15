@@ -13,10 +13,12 @@ from typing import TypedDict, Annotated, Literal, Optional
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 import json
+import re
 from datetime import datetime
 
 from tools import get_schedule_by_club, search_knowledge_base, get_payment_link
@@ -248,34 +250,91 @@ async def ai_agent_node(state: FermerState) -> dict:
     """
     Node 5: Main AI Agent (Batyr) with tools.
     Equivalent to n8n "AI agent RAG" node.
-    
+
     Tools available:
     - get_schedule_by_club: Fetch training schedule
     - search_knowledge_base: RAG search in Pinecone
     - get_payment_link: Generate payment link
+
+    This implements a ReAct-style agent that:
+    1. Calls tools as needed
+    2. Iterates until the LLM produces a final response
+    3. Parses the JSON output for escalation info
     """
+    tools = [get_schedule_by_club, search_knowledge_base, get_payment_link]
+    tools_by_name = {tool.name: tool for tool in tools}
+
     llm = ChatOpenAI(
         model="gpt-4o",
         temperature=0.7,
-    ).bind_tools([
-        get_schedule_by_club,
-        search_knowledge_base,
-        get_payment_link,
-    ])
-    
-    # Add structured output
-    structured_llm = llm.with_structured_output(AgentResponse)
-    
+    ).bind_tools(tools)
+
+    messages = list(state["messages"])
+    max_iterations = 5  # Prevent infinite loops
+
     try:
-        response: AgentResponse = await structured_llm.ainvoke(state["messages"])
-        
+        for _ in range(max_iterations):
+            # Call LLM
+            response = await llm.ainvoke(messages)
+            messages.append(response)
+
+            # Check if LLM wants to call tools
+            if response.tool_calls:
+                # Execute each tool call
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+
+                    if tool_name in tools_by_name:
+                        tool = tools_by_name[tool_name]
+                        # Execute the tool
+                        try:
+                            tool_result = await tool.ainvoke(tool_args)
+                        except Exception as e:
+                            tool_result = f"Error executing {tool_name}: {str(e)}"
+
+                        # Add tool result to messages
+                        messages.append(ToolMessage(
+                            content=str(tool_result),
+                            tool_call_id=tool_call["id"],
+                        ))
+                    else:
+                        messages.append(ToolMessage(
+                            content=f"Unknown tool: {tool_name}",
+                            tool_call_id=tool_call["id"],
+                        ))
+            else:
+                # No tool calls - LLM produced final response
+                break
+
+        # Parse the final response for escalation info
+        final_content = response.content
+        escalation_needed = False
+        escalation_reason = ""
+        response_text = final_content
+
+        # Try to parse as JSON (as specified in system prompt)
+        try:
+            # Extract JSON from response if wrapped in markdown
+            json_match = re.search(r'\{[\s\S]*\}', final_content)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                response_text = parsed.get("response", parsed.get("response_text", final_content))
+                escalation_data = parsed.get("escalation", {})
+                if isinstance(escalation_data, dict):
+                    escalation_needed = escalation_data.get("needed", False)
+                    escalation_reason = escalation_data.get("reason", "")
+        except (json.JSONDecodeError, AttributeError):
+            # If not valid JSON, use the raw response
+            pass
+
         return {
-            "response_text": response.response_text,
-            "escalation_needed": response.escalation.needed,
-            "escalation_reason": response.escalation.reason,
-            "messages": [AIMessage(content=response.response_text)],
+            "response_text": response_text,
+            "escalation_needed": escalation_needed,
+            "escalation_reason": escalation_reason,
+            "messages": messages,
         }
-        
+
     except Exception as e:
         return {
             "error": f"AI agent error: {str(e)}",
