@@ -7,15 +7,19 @@ Migrated from n8n:
 - get_schedule_by_club (JS Code node → Python)
 - Fermer vector store (Pinecone RAG)
 - get_payment_link (HTTP Request node)
+- Google Docs tools (8 tools for knowledge retrieval)
+- Image analysis tool
 """
 
 from langchain_core.tools import tool
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_core.messages import HumanMessage
 from pinecone import Pinecone
 from typing import Optional, Literal
 from datetime import datetime, timedelta
 import httpx
 import os
+import re
 
 
 # ============== CONSTANTS ==============
@@ -481,10 +485,299 @@ async def get_payment_link(
         return f"⚠️ Ошибка создания ссылки: {str(e)}"
 
 
+# ============== GOOGLE DOCS TOOLS ==============
+
+# Google Docs document IDs from n8n workflow
+GOOGLE_DOCS = {
+    "general_info": "1_mP4SDfMEp2VYxHIj05A0095W8lSsWguJe_Zpe2lVAk",
+    "social_features": "1Z3mJVCcnuStsUeuDpJHbU0AqKkqbFg0rE_G7tsPbV24",
+    "app_functionality": "1ewopNchiLLjI6boirr_yioeUFr85qJVxD8PShnZ1j30",
+    "workout_info": "165IR8XuFAHde53oQj99sThE4LEiacWxi-CRwf5WREkc",
+    "clan_battle_info": "18bhJv2E5hXJnkQ78EG_wQkSd0vX9ub7PhrqoWPIikVA",
+    "workouts_descriptions": "1B48SkXrZZFN3pIjyroKHiIiW0dT_xiJLoShe5emlRGg",
+    "membership_info": "18m2178NQ2CwDp1P3dJDI-BCAiWlu7I7BCd_3b7rYVFA",
+}
+
+# Cache for Google Docs content (avoid repeated API calls)
+_docs_cache = {}
+
+
+async def _fetch_google_doc(doc_id: str) -> str:
+    """
+    Fetch content from Google Docs.
+    Uses export URL to get plain text without needing OAuth for public docs.
+    """
+    if doc_id in _docs_cache:
+        return _docs_cache[doc_id]
+
+    export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                export_url,
+                follow_redirects=True,
+                timeout=30.0,
+            )
+
+            if response.status_code == 200:
+                content = response.text
+                _docs_cache[doc_id] = content
+                return content
+            else:
+                return f"Ошибка загрузки документа: HTTP {response.status_code}"
+    except Exception as e:
+        return f"Ошибка загрузки документа: {str(e)}"
+
+
+@tool
+async def get_general_info() -> str:
+    """
+    Get general information about Hero's Journey:
+    - Locations of our studios
+    - Program information
+    - What we offer
+    - Rules
+
+    Use this tool when customer asks about:
+    - Where are you located?
+    - What programs do you have?
+    - What are the rules?
+    - General info about Hero's Journey
+    """
+    return await _fetch_google_doc(GOOGLE_DOCS["general_info"])
+
+
+@tool
+async def get_social_features() -> str:
+    """
+    Get information about social interactions in Hero's Journey:
+    - Referral codes and how they work
+    - Leaderboards system
+    - Clans and clan features
+    - Coaches information
+
+    Use this tool when customer asks about:
+    - Referral program
+    - How to invite friends
+    - What are clans?
+    - Leaderboard rankings
+    - Who are the coaches?
+    """
+    return await _fetch_google_doc(GOOGLE_DOCS["social_features"])
+
+
+@tool
+async def get_app_functionality() -> str:
+    """
+    Get information about the Hero's Journey app functionality:
+    - How to book classes
+    - How to cancel bookings
+    - App features and daily operations
+    - Technical instructions
+
+    Use this tool when customer asks about:
+    - How do I book a class?
+    - How to cancel my booking?
+    - How does the app work?
+    - App issues or questions
+    """
+    return await _fetch_google_doc(GOOGLE_DOCS["app_functionality"])
+
+
+@tool
+async def get_workout_info() -> str:
+    """
+    Get detailed information about training types at Hero's Journey:
+    - RT (Resistance Training) details
+    - Bootcamp workouts
+    - Reshape sessions
+    - Other training formats
+
+    Use this tool when customer asks about:
+    - What types of workouts do you have?
+    - What is RT/Bootcamp/Reshape?
+    - How are trainings structured?
+    - Training intensity levels
+    """
+    return await _fetch_google_doc(GOOGLE_DOCS["workout_info"])
+
+
+@tool
+async def get_clan_battle_info() -> str:
+    """
+    Get information about the Battle of Clans at Hero's Journey:
+    - How clan battles work
+    - Scoring system
+    - Prizes and rewards
+    - How to participate
+
+    Use this tool when customer asks about:
+    - What is clan battle?
+    - How do I join a clan?
+    - How does scoring work?
+    - What can I win?
+    """
+    return await _fetch_google_doc(GOOGLE_DOCS["clan_battle_info"])
+
+
+@tool
+async def get_workouts_descriptions() -> str:
+    """
+    Get detailed workout descriptions:
+    - How each training type works step-by-step
+    - Detailed info about each training set
+    - All workout types we have
+    - What to expect in each class
+
+    Use this tool when customer asks about:
+    - What happens in a typical class?
+    - Detailed workout breakdown
+    - What exercises are included?
+    - How long are the sets?
+    """
+    return await _fetch_google_doc(GOOGLE_DOCS["workouts_descriptions"])
+
+
+@tool
+async def get_membership_info() -> str:
+    """
+    Get membership plan descriptions:
+    - Hero's Pass details (6 and 12 month options)
+    - Trial programs (Hero's Week, Basecamp, First Step)
+    - Pricing information
+    - What's included in each plan
+    - Payment options (including Kaspi installments 0-0-12)
+
+    Use this tool when customer asks about:
+    - Membership prices
+    - What's included in Hero's Pass?
+    - Trial options
+    - Payment plans and installments
+    """
+    return await _fetch_google_doc(GOOGLE_DOCS["membership_info"])
+
+
+# ============== IMAGE ANALYSIS TOOL ==============
+
+@tool
+async def analyze_image(image_url: str, question: Optional[str] = None) -> str:
+    """
+    Analyze an image sent by the customer using GPT-4 Vision.
+
+    Use this tool when:
+    - Customer sends a photo/image
+    - Need to understand what's in an image
+    - Customer asks about something in a picture
+
+    Args:
+        image_url: URL of the image to analyze
+        question: Optional specific question about the image
+
+    Returns:
+        Description or analysis of the image content
+    """
+    try:
+        llm = ChatOpenAI(model="gpt-4o", temperature=0.3)
+
+        prompt = question or "Опиши что на этом изображении. Если это связано с фитнесом или тренировками, дай соответствующий контекст."
+
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ]
+        )
+
+        response = await llm.ainvoke([message])
+        return response.content
+
+    except Exception as e:
+        return f"Не удалось проанализировать изображение: {str(e)}"
+
+
+# ============== USER PROFILE TOOL ==============
+
+@tool
+async def update_user_profile(
+    chat_id: str,
+    field: Literal["goal", "fitness_level", "time_preferences", "health_limitations", "barriers"],
+    value: str,
+) -> str:
+    """
+    Update user profile information based on conversation.
+
+    Use this tool when you learn new information about the user:
+    - Their fitness goals
+    - Current fitness level
+    - Time preferences for training
+    - Health limitations or injuries
+    - Barriers to training
+
+    Args:
+        chat_id: User's chat ID
+        field: Which profile field to update
+        value: The new value for the field
+
+    Returns:
+        Confirmation message
+    """
+    mutation = """
+    mutation UpdateUserProfile($chatId: String!, $field: String!, $value: String!) {
+        updateFermerProfile(
+            chatId: $chatId
+            updates: { field: $field, value: $value }
+        ) {
+            success
+        }
+    }
+    """
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                GRAPHQL_ENDPOINT,
+                json={
+                    "query": mutation,
+                    "variables": {
+                        "chatId": chat_id,
+                        "field": field,
+                        "value": value,
+                    }
+                },
+                headers={
+                    "Authorization": f"Bearer {AUTH_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                timeout=30.0,
+            )
+            data = response.json()
+
+        if data.get("data", {}).get("updateFermerProfile", {}).get("success"):
+            return f"✅ Профиль обновлен: {field} = {value}"
+        else:
+            return "Профиль не был обновлен"
+
+    except Exception as e:
+        return f"Ошибка обновления профиля: {str(e)}"
+
+
 # ============== EXPORT ==============
 
 __all__ = [
+    # Core tools
     "get_schedule_by_club",
-    "search_knowledge_base", 
+    "search_knowledge_base",
     "get_payment_link",
+    # Google Docs tools
+    "get_general_info",
+    "get_social_features",
+    "get_app_functionality",
+    "get_workout_info",
+    "get_clan_battle_info",
+    "get_workouts_descriptions",
+    "get_membership_info",
+    # Other tools
+    "analyze_image",
+    "update_user_profile",
 ]

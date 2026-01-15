@@ -31,6 +31,10 @@ AMOCRM_PIPELINE_ID = "10354830"
 AMOCRM_STATUS_INITIAL = "81882938"
 AMOCRM_STATUS_HUMAN = "81914526"
 
+# Notion configuration
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DATABASE_ID = "29b0a16f-4371-81cc-9794-ce306f1d13c6"  # From n8n workflow
+
 
 # ============== GRAPHQL INTEGRATION ==============
 
@@ -423,6 +427,112 @@ async def update_amocrm_lead(
             return response.status_code == 200
 
 
+# ============== NOTION INTEGRATION ==============
+
+async def create_notion_escalation(
+    chat_id: str,
+    user_name: str,
+    escalation_reason: str,
+    last_message: str,
+    ai_response: str,
+    club_name: str = "",
+) -> bool:
+    """
+    Create escalation page in Notion database.
+
+    Equivalent to n8n "Create a database page2" node.
+
+    Args:
+        chat_id: User's chat ID
+        user_name: User's name
+        escalation_reason: Why escalation was triggered
+        last_message: Last user message
+        ai_response: AI's response before escalation
+        club_name: Club name
+
+    Returns:
+        True if successful
+    """
+    if not NOTION_TOKEN:
+        return False
+
+    from datetime import datetime
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://api.notion.com/v1/pages",
+            json={
+                "parent": {"database_id": NOTION_DATABASE_ID},
+                "properties": {
+                    "Name": {
+                        "title": [
+                            {"text": {"content": f"Escalation: {user_name} ({chat_id})"}}
+                        ]
+                    },
+                    "Chat ID": {
+                        "rich_text": [
+                            {"text": {"content": chat_id}}
+                        ]
+                    },
+                    "Reason": {
+                        "rich_text": [
+                            {"text": {"content": escalation_reason}}
+                        ]
+                    },
+                    "Club": {
+                        "rich_text": [
+                            {"text": {"content": club_name}}
+                        ]
+                    },
+                    "Status": {
+                        "select": {"name": "New"}
+                    },
+                    "Created": {
+                        "date": {"start": datetime.now().isoformat()}
+                    },
+                },
+                "children": [
+                    {
+                        "object": "block",
+                        "type": "heading_2",
+                        "heading_2": {
+                            "rich_text": [{"text": {"content": "Last User Message"}}]
+                        }
+                    },
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [{"text": {"content": last_message}}]
+                        }
+                    },
+                    {
+                        "object": "block",
+                        "type": "heading_2",
+                        "heading_2": {
+                            "rich_text": [{"text": {"content": "AI Response"}}]
+                        }
+                    },
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [{"text": {"content": ai_response}}]
+                        }
+                    },
+                ]
+            },
+            headers={
+                "Authorization": f"Bearer {NOTION_TOKEN}",
+                "Content-Type": "application/json",
+                "Notion-Version": "2022-06-28",
+            },
+            timeout=30.0,
+        )
+
+        return response.status_code == 200
+
+
 # ============== EXPORT ==============
 
 __all__ = [
@@ -431,4 +541,5 @@ __all__ = [
     "send_whatsapp_message",
     "notify_telegram",
     "update_amocrm_lead",
+    "create_notion_escalation",
 ]
