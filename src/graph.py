@@ -21,14 +21,31 @@ import json
 import re
 from datetime import datetime
 
-from tools import get_schedule_by_club, search_knowledge_base, get_payment_link
+from tools import (
+    # Core tools
+    get_schedule_by_club,
+    search_knowledge_base,
+    get_payment_link,
+    # Google Docs tools
+    get_general_info,
+    get_social_features,
+    get_app_functionality,
+    get_workout_info,
+    get_clan_battle_info,
+    get_workouts_descriptions,
+    get_membership_info,
+    # Other tools
+    analyze_image,
+    update_user_profile,
+)
 from prompts import get_system_prompt, get_user_prompt
 from integrations import (
     fetch_fermer_data,
     log_message_to_db,
     send_whatsapp_message,
     notify_telegram,
-    update_amocrm_lead
+    update_amocrm_lead,
+    create_notion_escalation,
 )
 
 
@@ -251,17 +268,43 @@ async def ai_agent_node(state: FermerState) -> dict:
     Node 5: Main AI Agent (Batyr) with tools.
     Equivalent to n8n "AI agent RAG" node.
 
-    Tools available:
+    Tools available (matching n8n workflow):
     - get_schedule_by_club: Fetch training schedule
     - search_knowledge_base: RAG search in Pinecone
     - get_payment_link: Generate payment link
+    - get_general_info: General Hero's Journey info
+    - get_social_features: Referrals, clans, leaderboards
+    - get_app_functionality: App usage instructions
+    - get_workout_info: Training types info
+    - get_clan_battle_info: Clan battle details
+    - get_workouts_descriptions: Detailed workout descriptions
+    - get_membership_info: Membership plans and pricing
+    - analyze_image: Analyze customer images
+    - update_user_profile: Update user profile data
 
     This implements a ReAct-style agent that:
     1. Calls tools as needed
     2. Iterates until the LLM produces a final response
     3. Parses the JSON output for escalation info
     """
-    tools = [get_schedule_by_club, search_knowledge_base, get_payment_link]
+    # All tools matching n8n workflow
+    tools = [
+        # Core tools
+        get_schedule_by_club,
+        search_knowledge_base,
+        get_payment_link,
+        # Google Docs tools (from n8n)
+        get_general_info,
+        get_social_features,
+        get_app_functionality,
+        get_workout_info,
+        get_clan_battle_info,
+        get_workouts_descriptions,
+        get_membership_info,
+        # Other tools
+        analyze_image,
+        update_user_profile,
+    ]
     tools_by_name = {tool.name: tool for tool in tools}
 
     llm = ChatOpenAI(
@@ -435,31 +478,55 @@ async def handle_escalation_node(state: FermerState) -> dict:
     """
     Node 8: Handle escalation to human managers.
     Equivalent to n8n "If Human Needed" → Telegram/Notion flow.
+
+    Actions (matching n8n):
+    1. Send Telegram notification to club managers
+    2. Create Notion page for tracking
+    3. Update AmoCRM lead status to "human_needed"
     """
     if not state.get("escalation_needed"):
         return {}
-    
+
     try:
-        # Notify Telegram group
+        # Get user info for notifications
+        user_data = state.get("user_data", {})
+        user_name = f"{user_data.get('firstName', '')} {user_data.get('lastName', '')}".strip() or "Unknown"
+        club_name = user_data.get("club", {}).get("name", "")
+
+        # 1. Notify Telegram group (equivalent to n8n "Send a text message" node)
         tg_chat = state.get("club_tg_chat") or -1003234914487  # Default managers group
-        
+
         await notify_telegram(
             chat_id=tg_chat,
-            message=f"🚨 Эскалация: {state['sender_id']}\n\n"
-                    f"Причина: {state.get('escalation_reason', 'Не указана')}\n\n"
-                    f"Последнее сообщение:\n"
-                    f"USER: {state['message']}\n"
-                    f"AI: {state.get('response_text', '')}",
+            message=f"🚨 <b>Эскалация</b>\n\n"
+                    f"👤 Клиент: {user_name}\n"
+                    f"📱 Chat ID: {state['sender_id']}\n"
+                    f"🏢 Клуб: {club_name}\n\n"
+                    f"❗ Причина: {state.get('escalation_reason', 'Не указана')}\n\n"
+                    f"💬 <b>Последнее сообщение:</b>\n"
+                    f"USER: {state['message']}\n\n"
+                    f"🤖 <b>Ответ AI:</b>\n"
+                    f"{state.get('response_text', '')[:500]}",
         )
-        
-        # Update AmoCRM lead status
+
+        # 2. Create Notion page (equivalent to n8n "Create a database page2" node)
+        await create_notion_escalation(
+            chat_id=state["sender_id"],
+            user_name=user_name,
+            escalation_reason=state.get("escalation_reason", "Не указана"),
+            last_message=state["message"],
+            ai_response=state.get("response_text", ""),
+            club_name=club_name,
+        )
+
+        # 3. Update AmoCRM lead status (equivalent to n8n AmoCRM nodes)
         await update_amocrm_lead(
             chat_id=state["sender_id"],
             status="human_needed",
         )
-        
+
         return {}
-        
+
     except Exception as e:
         return {"error": f"Escalation failed: {str(e)}"}
 
