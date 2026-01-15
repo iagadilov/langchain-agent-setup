@@ -311,9 +311,28 @@ def _format_date(dt: datetime) -> str:
 
 # ============== KNOWLEDGE BASE TOOL (Pinecone RAG) ==============
 
-# Initialize Pinecone
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+# Lazy initialization for Pinecone and embeddings
+_pc = None
+_embeddings = None
+
+
+def _get_pinecone():
+    """Lazy initialization of Pinecone client."""
+    global _pc
+    if _pc is None:
+        api_key = os.getenv("PINECONE_API_KEY")
+        if not api_key:
+            raise ValueError("PINECONE_API_KEY environment variable is not set")
+        _pc = Pinecone(api_key=api_key)
+    return _pc
+
+
+def _get_embeddings():
+    """Lazy initialization of OpenAI embeddings."""
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+    return _embeddings
 
 
 @tool
@@ -359,8 +378,10 @@ async def search_knowledge_base(query: str) -> str:
         Релевантные документы из базы знаний
     """
     try:
+        pc = _get_pinecone()
+        embeddings = _get_embeddings()
         index = pc.Index("fermer-knowledge")
-        
+
         # Get embedding for query
         query_embedding = await embeddings.aembed_query(query)
         
